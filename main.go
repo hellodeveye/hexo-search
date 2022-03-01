@@ -3,41 +3,50 @@ package main
 import (
 	"fmt"
 	"github.com/RediSearch/redisearch-go/redisearch"
+	"github.com/go-redis/redis"
 	"github.com/gocolly/colly/v2"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 var c *redisearch.Client
+var client *redis.Client
 
 func init() {
-	// Create a client. By default a client is schemaless
-	// unless a schema is provided when creating the index
-	c = redisearch.NewClient("localhost:55000", "deveye")
+	c = redisearch.NewClient("localhost:55007", "deveye")
+	client = redis.NewClient(&redis.Options{
+		Addr:     "localhost:55007",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+		PoolSize: 10, // 连接池的大小为 10
+	})
 
 	// Drop an existing index. If the index does not exist an error is returned
 	c.Drop()
-
 	// Create a schema
 	sc := redisearch.NewSchema(redisearch.DefaultOptions).
-		AddField(redisearch.NewTextField("content")).
 		AddField(redisearch.NewTextFieldOptions("title", redisearch.TextFieldOptions{Weight: 5.0, Sortable: true})).
-		AddField(redisearch.NewTextField("link"))
+		AddField(redisearch.NewTextField("content")).
+		AddField(redisearch.NewTextField("link")).
+		AddField(redisearch.NewTextField("date"))
 
 	// Create the index with the given schema
-	if err := c.CreateIndex(sc); err != nil {
+	definition := redisearch.NewIndexDefinition().AddPrefix("blog:")
+	if err := c.CreateIndexWithIndexDefinition(sc, definition); err != nil {
 		log.Fatal(err)
 	}
+
 	// Create a document with an id and given score
 	var docs []redisearch.Document
 	for i, article := range FetchAllArticles() {
-		doc := redisearch.NewDocument(fmt.Sprintf("doc%d", i), 1.0)
-		doc.Set("title", article.Title).
-			Set("content", article.Content).
-			Set("link", article.Link).
-			Set("date", time.Now().Unix())
-		docs = append(docs, doc)
+		client.Do("HSET", fmt.Sprintf("blog:%d", i),
+			"title", article.Title,
+			"content", article.Content,
+			"link", article.Link,
+			"date", time.Now().Unix(),
+		)
 	}
 
 	indexingOptions := redisearch.IndexingOptions{
@@ -62,14 +71,13 @@ func Search(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	keyword := request.FormValue("keyword")
-	//pageSize, _ := strconv.Atoi(request.FormValue("pageSize"))
-	//pageNum, _ := strconv.Atoi(request.FormValue("pageNum"))
+	pageSize, _ := strconv.Atoi(request.FormValue("pageSize"))
+	pageNum, _ := strconv.Atoi(request.FormValue("pageNum"))
 	// Searching with limit and sorting
 	docs, total, err := c.Search(redisearch.NewQuery(keyword).
-		Limit(0, 100).
+		Limit(pageNum, pageSize).
 		SetLanguage("chinese").
 		SetReturnFields("title", "link"))
-
 	for _, doc := range docs {
 		fmt.Fprintln(writer, doc.Id, doc.Properties["title"], doc.Properties["link"], total)
 	}
